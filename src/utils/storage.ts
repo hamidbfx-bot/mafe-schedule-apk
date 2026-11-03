@@ -1,9 +1,11 @@
-import { Student, LessonSession, AppSettings } from '../types';
+import { Student, LessonSession, AppSettings, SyncMeta } from '../types';
+import { manilaTodayISO } from './timezone';
 
 const STORAGE_KEYS = {
   SESSIONS: 'tutor_schedule_sessions_v1',
   STUDENTS: 'tutor_schedule_students_v1',
   SETTINGS: 'tutor_schedule_settings_v1',
+  SYNC_META: 'tutor_schedule_sync_meta_v1',
 };
 
 export const INITIAL_STUDENTS: Student[] = [
@@ -169,7 +171,7 @@ export const INITIAL_SESSIONS: LessonSession[] = [
     isCompleted: false,
     alarmEnabled: true,
     alarmTone: 'chime',
-    alarmNoticeMinutes: 10,
+    alarmNoticeMinutes: 15,
   },
   {
     id: 'sess-2',
@@ -186,7 +188,7 @@ export const INITIAL_SESSIONS: LessonSession[] = [
     isCompleted: false,
     alarmEnabled: true,
     alarmTone: 'radar',
-    alarmNoticeMinutes: 10,
+    alarmNoticeMinutes: 15,
   },
   {
     id: 'sess-3',
@@ -203,7 +205,7 @@ export const INITIAL_SESSIONS: LessonSession[] = [
     isCompleted: false,
     alarmEnabled: true,
     alarmTone: 'gentle-bell',
-    alarmNoticeMinutes: 10,
+    alarmNoticeMinutes: 15,
   },
   {
     id: 'sess-4',
@@ -221,7 +223,7 @@ export const INITIAL_SESSIONS: LessonSession[] = [
     tag: 'Needs Attention',
     alarmEnabled: true,
     alarmTone: 'chime',
-    alarmNoticeMinutes: 10,
+    alarmNoticeMinutes: 15,
   },
   {
     id: 'sess-5',
@@ -238,7 +240,7 @@ export const INITIAL_SESSIONS: LessonSession[] = [
     isCompleted: false,
     alarmEnabled: true,
     alarmTone: 'chime',
-    alarmNoticeMinutes: 10,
+    alarmNoticeMinutes: 15,
   },
   {
     id: 'sess-6',
@@ -255,7 +257,7 @@ export const INITIAL_SESSIONS: LessonSession[] = [
     isCompleted: false,
     alarmEnabled: true,
     alarmTone: 'radar',
-    alarmNoticeMinutes: 10,
+    alarmNoticeMinutes: 15,
   },
 ];
 
@@ -267,12 +269,48 @@ export const DEFAULT_SETTINGS: AppSettings = {
   autoDismissAfterMinutes: 10,
   vibrateEnabled: true,
   editPassword: '121402',
+  defaultAlarmNoticeMinutes: 15,
 };
+
+// ---- Daily sync metadata (Manila calendar day) ----
+export function loadSyncMeta(): SyncMeta | null {
+  try {
+    const raw = localStorage.getItem(STORAGE_KEYS.SYNC_META);
+    if (raw) return JSON.parse(raw) as SyncMeta;
+  } catch {
+    // ignore
+  }
+  return null;
+}
+
+export function saveSyncMeta(meta: SyncMeta): void {
+  try {
+    localStorage.setItem(STORAGE_KEYS.SYNC_META, JSON.stringify(meta));
+  } catch {
+    // ignore
+  }
+}
+
+/** True if we have not yet synced on the current Manila calendar day. */
+export function shouldSyncToday(): boolean {
+  const meta = loadSyncMeta();
+  if (!meta) return true;
+  return meta.lastSyncDate !== manilaTodayISO();
+}
 
 export function loadStoredStudents(): Student[] {
   try {
     const raw = localStorage.getItem(STORAGE_KEYS.STUDENTS);
-    if (raw) return JSON.parse(raw);
+    if (raw) {
+      const parsed = JSON.parse(raw) as Student[];
+      // De-duplicate by id (older caches may contain name-variant duplicates)
+      const seen = new Set<string>();
+      return parsed.filter((s) => {
+        if (seen.has(s.id)) return false;
+        seen.add(s.id);
+        return true;
+      });
+    }
   } catch {
     // ignore
   }

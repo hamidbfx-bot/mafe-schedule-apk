@@ -31,7 +31,7 @@ export interface LessonSession {
   tag?: string; // "Needs Attention", "Exam Prep", etc.
   alarmEnabled: boolean;
   alarmTone: AlarmTone;
-  alarmNoticeMinutes: number; // 10
+  alarmNoticeMinutes?: number; // minutes before class; falls back to settings default (15)
 }
 
 export interface ActiveAlarmState {
@@ -50,4 +50,10 @@ export interface AppSettings {
   autoDismissAfterMinutes: number;
   vibrateEnabled: boolean;
   editPassword?: string;
+  defaultAlarmNoticeMinutes: number; // minutes before class to ring, default 15
+}
+
+export interface SyncMeta {
+  lastSyncAt: number; // epoch ms
+  lastSyncDate: string; // Manila YYYY-MM-DD of the last successful sync
 }

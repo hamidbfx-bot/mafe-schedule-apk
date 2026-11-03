@@ -1,6 +1,7 @@
 import React from 'react';
 import { ActiveAlarmState, AppSettings, LessonSession } from '../types';
 import { strings } from '../utils/translations';
+import { formatManilaTime, getUpcomingSessions, sessionEpochMs } from '../utils/timezone';
 
 interface AlarmsViewProps {
   activeAlarm: ActiveAlarmState;
@@ -38,8 +39,9 @@ export const AlarmsView: React.FC<AlarmsViewProps> = ({
     return `${padM} mins ${padS} secs ${strings.remaining}`;
   };
 
-  // Target current session or fallback to first session
-  const targetSession = activeAlarm.session || sessions[0];
+  // Target current session or fallback to the next upcoming one (Manila time)
+  const upcoming = getUpcomingSessions(sessions);
+  const targetSession = activeAlarm.session || upcoming[0] || sessions[0];
   const ringDuration = settings.alarmDurationSeconds || 30;
 
   return (
@@ -98,7 +100,10 @@ export const AlarmsView: React.FC<AlarmsViewProps> = ({
             </div>
             <p className="text-xs text-pink-100 mt-0.5 truncate">
               {targetSession ? targetSession.subject : 'Math'} Session starting at{' '}
-              <strong>{targetSession ? targetSession.displayTime : '09:00 AM'}</strong>
+              <strong>
+                {targetSession ? formatManilaTime(sessionEpochMs(targetSession)) : '09:00 AM'}
+              </strong>{' '}
+              (Manila)
             </p>
             <p className="text-xs text-yellow-300 font-extrabold flex items-center gap-1 mt-1">
               <span className="material-symbols-outlined text-sm">schedule</span>
@@ -232,9 +237,10 @@ export const AlarmsView: React.FC<AlarmsViewProps> = ({
           {strings.upcomingSessionsAlarms}
         </h3>
 
-        {/* Live sessions from database */}
-        {sessions.slice(0, 5).map((session, index) => {
+        {/* Upcoming sessions sorted by Manila-time start */}
+        {(upcoming.length > 0 ? upcoming : sessions).slice(0, 5).map((session, index) => {
           const isFirst = index === 0;
+          const noticeMin = session.alarmNoticeMinutes || settings.defaultAlarmNoticeMinutes || 15;
           return (
             <div
               key={session.id}
@@ -255,37 +261,31 @@ export const AlarmsView: React.FC<AlarmsViewProps> = ({
                   </p>
                 </div>
                 <div className="text-right">
-                  <span className="text-sm font-black text-[#be185d]">{session.displayTime}</span>
+                  <span className="text-sm font-black text-[#be185d]">
+                    {formatManilaTime(sessionEpochMs(session))}
+                  </span>
                   <p className="text-[10px] text-pink-600 font-bold">{session.date}</p>
                 </div>
               </div>
 
               <div className="bg-[#fff8f7] rounded-xl p-2.5 text-xs space-y-2 border border-[#ffd8e1]/60">
-                <div className="flex items-center justify-between text-gray-600">
-                  <span className="flex items-center gap-1.5">
-                    <span className="material-symbols-outlined text-sm text-[#be185d]">
-                      notifications
-                    </span>{' '}
-                    {strings.silentPush15m}
-                  </span>
-                  <span className="text-emerald-600 font-bold flex items-center gap-0.5">
-                    <span className="material-symbols-outlined text-sm">done</span>{' '}
-                    {strings.delivered}
-                  </span>
-                </div>
                 <div className="flex items-center justify-between text-gray-800 font-bold">
                   <span className="flex items-center gap-1.5">
                     <span className="material-symbols-outlined text-sm text-red-500 animate-pulse">
                       alarm
                     </span>{' '}
-                    {strings.loudAlarm10m}
+                    {strings.alarmBeforeClass(noticeMin)} •{' '}
+                    {formatManilaTime(sessionEpochMs(session) - noticeMin * 60_000)}
                   </span>
                   <span className="text-red-600 text-[11px] bg-red-100 px-2 py-0.5 rounded-full font-bold">
                     {isFirst && (activeAlarm.isRinging || isSoundPlaying)
                       ? strings.sounding
-                      : 'Armed'}
+                      : strings.armed}
                   </span>
                 </div>
+                <p className="text-[10px] text-gray-500">
+                  {strings.classNotificationsDesc}
+                </p>
               </div>
             </div>
           );

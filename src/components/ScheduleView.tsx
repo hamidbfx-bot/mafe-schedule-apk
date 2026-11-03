@@ -139,7 +139,7 @@ export const ScheduleView: React.FC<ScheduleViewProps> = ({
             <div>
               <p className="text-sm font-bold text-gray-800">No lessons scheduled for this day</p>
               <p className="text-xs text-gray-500 mt-0.5">
-                New sessions registered on tutor-schedule-90593.web.app will appear here automatically.
+                Sessions from tutor-schedule-90593.web.app sync once a day (Manila time). Tap "Sync now" on the Next tab for an instant refresh.
               </p>
             </div>
             <button

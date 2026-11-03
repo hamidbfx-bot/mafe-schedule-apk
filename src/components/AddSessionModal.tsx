@@ -12,6 +12,7 @@ interface AddSessionModalProps {
   students: Student[];
   onOpenNewStudentModal: () => void;
   defaultDate?: string;
+  defaultNoticeMinutes?: number;
 }
 
 export const AddSessionModal: React.FC<AddSessionModalProps> = ({
@@ -23,6 +24,7 @@ export const AddSessionModal: React.FC<AddSessionModalProps> = ({
   students,
   onOpenNewStudentModal,
   defaultDate = '2026-11-02',
+  defaultNoticeMinutes = 15,
 }) => {
   const [studentName, setStudentName] = useState('');
   const [selectedStudentId, setSelectedStudentId] = useState('');
@@ -117,7 +119,7 @@ export const AddSessionModal: React.FC<AddSessionModalProps> = ({
       tag: tag || undefined,
       alarmEnabled: true,
       alarmTone,
-      alarmNoticeMinutes: 10,
+      alarmNoticeMinutes: defaultNoticeMinutes,
     });
   };
 
@@ -376,12 +378,12 @@ export const AddSessionModal: React.FC<AddSessionModalProps> = ({
               </label>
             </div>
 
-            {/* 5. Alarm Setup (15m & 10m Ringing) */}
+            {/* 5. Alarm Setup (rings before class, Manila time) */}
             <div className="p-3.5 bg-[#fff0f2]/60 rounded-xl border border-[#ffd8e1] space-y-2.5">
               <div className="flex items-center justify-between">
                 <span className="text-xs font-bold text-[#be185d] flex items-center gap-1.5">
                   <span className="material-symbols-outlined text-base">alarm_on</span>
-                  {strings.tieredAlarms}
+                  {strings.classAlarmNotice(defaultNoticeMinutes)}
                 </span>
                 <span className="text-[10px] font-bold bg-[#ffd8e1] text-[#9d224b] px-2 py-0.5 rounded-full">
                   {strings.active}

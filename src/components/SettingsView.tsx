@@ -1,8 +1,14 @@
 import React, { useState } from 'react';
-import { AlarmTone, AppSettings, LessonSession, Student } from '../types';
+import { AlarmTone, AppSettings, LessonSession, Student, SyncMeta } from '../types';
 import { strings } from '../utils/translations';
 import { playTone } from '../utils/audioAlarm';
 import { SITE_EDIT_PASSWORD } from '../services/firebaseSync';
+import {
+  isNativeApp,
+  ensureNotificationSetup,
+  sendTestNotification,
+} from '../services/nativeNotifications';
+import { formatManilaDate, formatManilaTime } from '../utils/timezone';
 
 interface SettingsViewProps {
   settings: AppSettings;
@@ -13,6 +19,8 @@ interface SettingsViewProps {
   onImportData: (data: { students: Student[]; sessions: LessonSession[] }) => void;
   isLiveConnected: boolean;
   onRefreshLive: () => void;
+  syncMeta: SyncMeta | null;
+  isSyncing: boolean;
 }
 
 export const SettingsView: React.FC<SettingsViewProps> = ({
@@ -24,9 +32,28 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
   onImportData,
   isLiveConnected,
   onRefreshLive,
+  syncMeta,
+  isSyncing,
 }) => {
   const [password, setPassword] = useState(settings.editPassword || SITE_EDIT_PASSWORD);
   const [passwordSaved, setPasswordSaved] = useState(false);
+  const [notifState, setNotifState] = useState<'idle' | 'granted' | 'denied'>('idle');
+  const [testSent, setTestSent] = useState(false);
+
+  const handleEnableNotifications = async () => {
+    const ok = await ensureNotificationSetup(true);
+    setNotifState(ok ? 'granted' : 'denied');
+  };
+
+  const handleTestNotification = async () => {
+    const ok = await sendTestNotification();
+    if (ok) {
+      setTestSent(true);
+      setTimeout(() => setTestSent(false), 6000);
+    } else {
+      setNotifState('denied');
+    }
+  };
 
   const handleTestTone = (tone: AlarmTone) => {
     playTone(tone, settings.alarmVolume);
@@ -124,19 +151,100 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
               tutor-schedule-90593.web.app
             </a>
           </p>
-          <p className="text-gray-600 text-[11px]">
-            New sessions added on the website automatically sync to this application in real-time.
+          <p className="text-gray-600 text-[11px]">{strings.dailySyncDesc}</p>
+          <p className="text-gray-600 text-[11px] font-medium">
+            {strings.lastSync}:{' '}
+            {syncMeta
+              ? `${formatManilaDate(syncMeta.lastSyncAt)} • ${formatManilaTime(syncMeta.lastSyncAt)}`
+              : strings.neverSynced}
           </p>
         </div>
 
         <button
           type="button"
           onClick={onRefreshLive}
-          className="w-full py-2 bg-[#fff0f2] text-[#be185d] text-xs font-bold rounded-xl border border-[#ffd8e1] hover:bg-[#ffe2e8] transition-colors flex items-center justify-center gap-1.5 cursor-pointer"
+          disabled={isSyncing}
+          className="w-full py-2 bg-[#fff0f2] text-[#be185d] text-xs font-bold rounded-xl border border-[#ffd8e1] hover:bg-[#ffe2e8] transition-colors flex items-center justify-center gap-1.5 cursor-pointer disabled:opacity-50"
         >
-          <span className="material-symbols-outlined text-base">sync</span>
-          Force Refresh Live Data
+          <span className={`material-symbols-outlined text-base ${isSyncing ? 'animate-spin' : ''}`}>
+            sync
+          </span>
+          {isSyncing ? strings.syncing : strings.syncNow}
         </button>
+      </div>
+
+      {/* Class Notifications (native Android) */}
+      <div className="bg-white rounded-2xl p-4 border border-[#ffd8e1] shadow-2xs space-y-3">
+        <span className="text-xs font-bold uppercase tracking-wider text-[#9d224b] flex items-center gap-1.5">
+          <span className="material-symbols-outlined text-base">notifications_active</span>
+          {strings.classNotifications}
+        </span>
+        <p className="text-[11px] text-gray-500">{strings.classNotificationsDesc}</p>
+
+        {isNativeApp() ? (
+          <div className="space-y-2">
+            <button
+              type="button"
+              onClick={handleEnableNotifications}
+              className={`w-full py-2 text-xs font-bold rounded-xl border transition-colors flex items-center justify-center gap-1.5 cursor-pointer ${
+                notifState === 'granted'
+                  ? 'bg-emerald-50 text-emerald-700 border-emerald-200'
+                  : 'bg-[#be185d] text-white border-[#be185d] hover:bg-[#9d224b]'
+              }`}
+            >
+              <span className="material-symbols-outlined text-base">
+                {notifState === 'granted' ? 'check_circle' : 'notifications'}
+              </span>
+              {notifState === 'granted' ? strings.notificationsEnabled : strings.enableNotifications}
+            </button>
+            <button
+              type="button"
+              onClick={handleTestNotification}
+              className="w-full py-2 bg-[#fff0f2] text-[#be185d] text-xs font-bold rounded-xl border border-[#ffd8e1] hover:bg-[#ffe2e8] transition-colors flex items-center justify-center gap-1.5 cursor-pointer"
+            >
+              <span className="material-symbols-outlined text-base">alarm_on</span>
+              {testSent ? strings.testNotificationSent : strings.testNotification}
+            </button>
+            {notifState === 'denied' && (
+              <p className="text-[10px] text-red-600 bg-red-50 border border-red-200 rounded-lg px-2 py-1.5">
+                {strings.notificationsDenied}
+              </p>
+            )}
+          </div>
+        ) : (
+          <p className="text-[10px] text-amber-700 bg-amber-50 border border-amber-200 rounded-lg px-2 py-1.5">
+            {strings.webOnlyNote}
+          </p>
+        )}
+
+        {/* Default notice minutes */}
+        <div className="space-y-1.5 pt-1 border-t border-[#ffd8e1]/40">
+          <div className="flex items-center justify-between">
+            <label className="text-xs font-bold text-gray-700">{strings.defaultNoticeMinutes}</label>
+            <span className="text-[10px] bg-[#ffd8e1] text-[#be185d] font-black px-2 py-0.5 rounded-full">
+              {settings.defaultAlarmNoticeMinutes || 15} min
+            </span>
+          </div>
+          <div className="grid grid-cols-4 gap-1.5 text-xs">
+            {[10, 15, 20, 30].map((min) => {
+              const isSelected = (settings.defaultAlarmNoticeMinutes || 15) === min;
+              return (
+                <button
+                  key={min}
+                  type="button"
+                  onClick={() => onUpdateSettings({ defaultAlarmNoticeMinutes: min })}
+                  className={`py-1.5 rounded-xl font-bold transition-all cursor-pointer text-center ${
+                    isSelected
+                      ? 'bg-[#be185d] text-white shadow-2xs'
+                      : 'bg-gray-50 border border-gray-200 text-gray-600 hover:bg-gray-100'
+                  }`}
+                >
+                  {min}m {min === 15 ? '★' : ''}
+                </button>
+              );
+            })}
+          </div>
+        </div>
       </div>
 
       {/* Edit Password for Site Integration */}

@@ -1,18 +1,22 @@
-import React, { useState, useEffect, useRef, useCallback } from 'react';
+import { useState, useEffect, useRef, useCallback } from 'react';
 import {
   ActiveAlarmState,
   AppSettings,
   LessonSession,
   Student,
+  SyncMeta,
 } from './types';
 import {
   DEFAULT_SETTINGS,
   loadStoredSessions,
   loadStoredSettings,
   loadStoredStudents,
+  loadSyncMeta,
   saveStoredSessions,
   saveStoredSettings,
   saveStoredStudents,
+  saveSyncMeta,
+  shouldSyncToday,
 } from './utils/storage';
 import {
   playTone,
@@ -25,16 +29,28 @@ import {
   getMondayOfWeek,
   formatDateISO,
   formatMonthHeader,
-  subscribeToWeekSessions,
-  fetchAllStudentsFromFirestore,
+  fetchAllSessionsOnce,
+  deriveStudentsFromSessions,
   toggleSessionCompletedInLive,
   addSessionToLive,
   updateSessionInLive,
   deleteSessionInLive,
   DAY_NAMES,
 } from './services/firebaseSync';
+import {
+  manilaTodayISO,
+  parseISODateAsLocal,
+  sessionEpochMs,
+  getNextUpcomingSession,
+} from './utils/timezone';
+import {
+  scheduleSessionAlarms,
+  setupNotificationListeners,
+  isNativeApp,
+} from './services/nativeNotifications';
 import { Header } from './components/Header';
 import { Navigation, NavTab } from './components/Navigation';
+import { NextClassView } from './components/NextClassView';
 import { ScheduleView } from './components/ScheduleView';
 import { AlarmsView } from './components/AlarmsView';
 import { StudentsView } from './components/StudentsView';
@@ -45,32 +61,31 @@ import { MessageModal } from './components/MessageModal';
 import { strings } from './utils/translations';
 
 export default function App() {
-  // Real-world Monday of the current week (e.g. 2026-11-02)
+  // Monday of the current week in MANILA time
   const [mondayDate, setMondayDate] = useState<Date>(() => getMondayOfWeek(new Date()));
   const currentWeekStart = formatDateISO(mondayDate);
 
-  // Selected date defaults to today or Monday of the week
-  const todayISO = formatDateISO(new Date());
-  const [selectedDate, setSelectedDate] = useState<string>(() => {
-    // If today is within this week, select today, otherwise select Monday
-    return todayISO;
-  });
+  const [selectedDate, setSelectedDate] = useState<string>(() => manilaTodayISO());
 
   const [sessions, setSessions] = useState<LessonSession[]>(() => loadStoredSessions());
   const [students, setStudents] = useState<Student[]>(() => loadStoredStudents());
   const [settings, setSettings] = useState<AppSettings>(() => loadStoredSettings());
+  const [syncMeta, setSyncMeta] = useState<SyncMeta | null>(() => loadSyncMeta());
 
-  const [currentTab, setCurrentTab] = useState<NavTab>('schedule');
+  const [currentTab, setCurrentTab] = useState<NavTab>('next');
   const [isLiveConnected, setIsLiveConnected] = useState<boolean>(true);
-  const [isSyncing, setIsSyncing] = useState<boolean>(true);
+  const [isSyncing, setIsSyncing] = useState<boolean>(false);
 
-  // Active alarm state (Pre-armed or dynamic from upcoming session)
+  // Active alarm state — driven by the next upcoming session in Manila time
   const [activeAlarm, setActiveAlarm] = useState<ActiveAlarmState>({
-    isRinging: true,
+    isRinging: false,
     session: undefined,
-    remainingSeconds: 577, // 09 mins 37 secs
+    remainingSeconds: 0,
     soundPlaying: false,
   });
+  const dismissedAlarmIds = useRef<Set<string>>(new Set());
+  const ringingSessionId = useRef<string | null>(null);
+  const isTestAlarm = useRef(false);
 
   // Modals state
   const [isAddModalOpen, setIsAddModalOpen] = useState(false);
@@ -78,7 +93,7 @@ export default function App() {
   const [isNewStudentModalOpen, setIsNewStudentModalOpen] = useState(false);
   const [selectedStudentForMessage, setSelectedStudentForMessage] = useState<Student | null>(null);
 
-  // Sync to localStorage
+  // Persist to localStorage (offline cache)
   useEffect(() => {
     saveStoredSessions(sessions);
   }, [sessions]);
@@ -91,7 +106,7 @@ export default function App() {
     saveStoredSettings(settings);
   }, [settings]);
 
-  // Handle Screen Wake Lock
+  // Screen wake lock while the app is open
   useEffect(() => {
     if (settings.wakeLockOverride) {
       requestWakeLock();
@@ -103,80 +118,158 @@ export default function App() {
     };
   }, [settings.wakeLockOverride]);
 
-  // Real-time synchronization with tutor-schedule-90593.web.app Firestore
-  useEffect(() => {
+  // ---------------------------------------------------------------
+  // Once-daily Firebase sync (Manila calendar day) to respect quotas.
+  // Reads happen only: on first launch of the day, or manual "Sync now".
+  // Writes (add/edit/delete) still go to Firestore immediately.
+  // ---------------------------------------------------------------
+  const syncFromCloud = useCallback(async (force: boolean) => {
+    if (!force && !shouldSyncToday()) return;
     setIsSyncing(true);
-    const unsubscribe = subscribeToWeekSessions(
-      currentWeekStart,
-      mondayDate,
-      (liveSessions) => {
-        setSessions(liveSessions);
-        setIsLiveConnected(true);
-        setIsSyncing(false);
-
-        // Update active alarm session if available
-        if (liveSessions.length > 0) {
-          setActiveAlarm((prev) => ({
-            ...prev,
-            session: prev.session || liveSessions[0],
-          }));
-        }
-      },
-      (err) => {
-        console.warn('Real-time sync error, using cached data:', err);
-        setIsSyncing(false);
-      }
-    );
-
-    return () => {
-      unsubscribe();
-    };
-  }, [currentWeekStart, mondayDate]);
-
-  // Fetch all students from Firestore on mount to populate Students directory
-  const loadAllStudents = useCallback(async () => {
     try {
-      const liveStudents = await fetchAllStudentsFromFirestore();
-      if (liveStudents.length > 0) {
-        setStudents(liveStudents);
-      }
-    } catch (e) {
-      console.warn('Could not load all students from live database:', e);
+      const cloudSessions = await fetchAllSessionsOnce();
+      setSessions(cloudSessions);
+      setStudents(deriveStudentsFromSessions(cloudSessions));
+      const meta: SyncMeta = { lastSyncAt: Date.now(), lastSyncDate: manilaTodayISO() };
+      saveSyncMeta(meta);
+      setSyncMeta(meta);
+      setIsLiveConnected(true);
+    } catch (err) {
+      console.warn('Daily sync failed, using cached data:', err);
+      setIsLiveConnected(false);
+    } finally {
+      setIsSyncing(false);
     }
   }, []);
 
+  // Sync on launch (only if not already synced today, Manila time)
   useEffect(() => {
-    loadAllStudents();
-  }, [loadAllStudents]);
+    syncFromCloud(false);
+  }, [syncFromCloud]);
 
-  // Countdown timer for active alarm
-  const countdownTimerRef = useRef<number | null>(null);
+  // Re-check when the app returns to the foreground (new Manila day → sync),
+  // and every 30 minutes while it stays open (covers crossing midnight).
   useEffect(() => {
-    if (activeAlarm.isRinging && activeAlarm.remainingSeconds > 0) {
-      countdownTimerRef.current = window.setInterval(() => {
-        setActiveAlarm((prev) => {
-          if (prev.remainingSeconds <= 1) {
-            return { ...prev, remainingSeconds: 0 };
-          }
-          return { ...prev, remainingSeconds: prev.remainingSeconds - 1 };
-        });
-      }, 1000);
-    } else {
-      if (countdownTimerRef.current !== null) {
-        window.clearInterval(countdownTimerRef.current);
-        countdownTimerRef.current = null;
-      }
-    }
-
-    return () => {
-      if (countdownTimerRef.current !== null) {
-        window.clearInterval(countdownTimerRef.current);
-        countdownTimerRef.current = null;
-      }
+    const onVisible = () => {
+      if (document.visibilityState === 'visible') syncFromCloud(false);
     };
-  }, [activeAlarm.isRinging, activeAlarm.remainingSeconds]);
+    document.addEventListener('visibilitychange', onVisible);
+    const interval = window.setInterval(() => syncFromCloud(false), 30 * 60_000);
+    return () => {
+      document.removeEventListener('visibilitychange', onVisible);
+      window.clearInterval(interval);
+    };
+  }, [syncFromCloud]);
 
-  // Week navigation controls
+  const handleSyncNow = useCallback(() => {
+    syncFromCloud(true);
+  }, [syncFromCloud]);
+
+  // ---------------------------------------------------------------
+  // Native (Android) local notifications: re-schedule whenever the
+  // sessions or the notice setting change. These fire even if the
+  // app is fully closed, using Manila-time absolute timestamps.
+  // ---------------------------------------------------------------
+  useEffect(() => {
+    if (!isNativeApp()) return;
+    const t = window.setTimeout(() => {
+      scheduleSessionAlarms(sessions, settings).catch((e) =>
+        console.warn('Scheduling native alarms failed:', e)
+      );
+    }, 800);
+    return () => window.clearTimeout(t);
+  }, [sessions, settings.defaultAlarmNoticeMinutes, settings.alarmTone]);
+
+  // Open the Next Class tab when a notification is tapped
+  useEffect(() => {
+    let handle: { remove: () => void } | null = null;
+    setupNotificationListeners(() => setCurrentTab('next')).then((h) => {
+      handle = h;
+    });
+    return () => {
+      if (handle) handle.remove();
+    };
+  }, []);
+
+  // ---------------------------------------------------------------
+  // In-app alarm engine (while the app is open):
+  // every second, find the next session; ring when inside the notice
+  // window (default 15 min before class, Manila time).
+  // ---------------------------------------------------------------
+  const [isSoundPlaying, setIsSoundPlaying] = useState(false);
+  const [soundRemainingSeconds, setSoundRemainingSeconds] = useState(30);
+
+  const startRinging = useCallback(
+    (session: LessonSession) => {
+      const duration = settings.alarmDurationSeconds || 30;
+      setIsSoundPlaying(true);
+      setSoundRemainingSeconds(duration);
+      startLoopingAlarm(
+        session.alarmTone || settings.alarmTone,
+        settings.alarmVolume,
+        duration,
+        (sec) => setSoundRemainingSeconds(sec),
+        () => setIsSoundPlaying(false)
+      );
+      if (settings.vibrateEnabled && navigator.vibrate) {
+        navigator.vibrate([400, 200, 400, 200, 400]);
+      }
+    },
+    [settings.alarmTone, settings.alarmVolume, settings.alarmDurationSeconds, settings.vibrateEnabled]
+  );
+
+  useEffect(() => {
+    const tick = () => {
+      const now = Date.now();
+      const next = getNextUpcomingSession(sessions, now);
+      if (!next) {
+        setActiveAlarm((prev) =>
+          prev.session && !prev.isRinging
+            ? { ...prev, session: undefined, remainingSeconds: 0 }
+            : prev.isRinging
+            ? prev
+            : { ...prev, session: undefined, remainingSeconds: 0 }
+        );
+        return;
+      }
+      const remaining = Math.max(0, Math.floor((sessionEpochMs(next) - now) / 1000));
+      const noticeSec = (next.alarmNoticeMinutes || settings.defaultAlarmNoticeMinutes || 15) * 60;
+      const shouldRing =
+        remaining <= noticeSec && remaining > 0 && !dismissedAlarmIds.current.has(next.id);
+
+      if (shouldRing && ringingSessionId.current !== next.id) {
+        ringingSessionId.current = next.id;
+        isTestAlarm.current = false;
+        startRinging(next);
+      }
+
+      setActiveAlarm((prev) => ({
+        ...prev,
+        session: prev.isRinging && prev.session ? prev.session : next,
+        remainingSeconds:
+          prev.isRinging && prev.session ? prev.remainingSeconds : remaining,
+        isRinging: prev.isRinging || shouldRing,
+        soundPlaying: isSoundPlaying,
+      }));
+    };
+    tick();
+    const timer = window.setInterval(tick, 1000);
+    return () => window.clearInterval(timer);
+  }, [sessions, settings.defaultAlarmNoticeMinutes, startRinging, isSoundPlaying]);
+
+  // Countdown for the ringing alarm banner
+  useEffect(() => {
+    if (!activeAlarm.isRinging) return;
+    const t = window.setInterval(() => {
+      setActiveAlarm((prev) => ({
+        ...prev,
+        remainingSeconds: Math.max(0, prev.remainingSeconds - 1),
+      }));
+    }, 1000);
+    return () => window.clearInterval(t);
+  }, [activeAlarm.isRinging]);
+
+  // Week navigation (Manila-based)
   const handlePrevWeek = () => {
     const prev = new Date(mondayDate);
     prev.setDate(prev.getDate() - 7);
@@ -192,14 +285,9 @@ export default function App() {
   };
 
   const handleCurrentWeek = () => {
-    const mon = getMondayOfWeek(new Date());
-    setMondayDate(mon);
-    setSelectedDate(formatDateISO(new Date()));
+    setMondayDate(getMondayOfWeek(new Date()));
+    setSelectedDate(manilaTodayISO());
   };
-
-  // 30-second alarm sound state
-  const [isSoundPlaying, setIsSoundPlaying] = useState<boolean>(false);
-  const [soundRemainingSeconds, setSoundRemainingSeconds] = useState<number>(30);
 
   const handleStopSound = useCallback(() => {
     stopLoopingAlarm();
@@ -207,48 +295,55 @@ export default function App() {
     setSoundRemainingSeconds(settings.alarmDurationSeconds || 30);
   }, [settings.alarmDurationSeconds]);
 
-  // Alarm controls
   const handleDismissAlarm = () => {
     handleStopSound();
-    setActiveAlarm((prev) => ({
-      ...prev,
-      isRinging: false,
-      soundPlaying: false,
-    }));
+    // Only suppress the real alarm on dismiss — a test alarm must not
+    // disable the actual reminder for that class.
+    if (activeAlarm.session && !isTestAlarm.current) {
+      dismissedAlarmIds.current.add(activeAlarm.session.id);
+    }
+    isTestAlarm.current = false;
+    ringingSessionId.current = null;
+    setActiveAlarm((prev) => ({ ...prev, isRinging: false, soundPlaying: false }));
   };
 
   const handleSnoozeAlarm = () => {
     handleStopSound();
-    setActiveAlarm((prev) => ({
-      ...prev,
-      remainingSeconds: prev.remainingSeconds + 300, // +5 min
-      soundPlaying: false,
-    }));
+    const snoozedId = activeAlarm.session?.id;
+    const wasTest = isTestAlarm.current;
+    isTestAlarm.current = false;
+    ringingSessionId.current = null;
+    setActiveAlarm((prev) => ({ ...prev, isRinging: false, soundPlaying: false }));
+    // Re-arm after 5 minutes (real alarms only)
+    if (snoozedId && !wasTest) {
+      dismissedAlarmIds.current.add(snoozedId);
+      window.setTimeout(() => {
+        dismissedAlarmIds.current.delete(snoozedId);
+      }, 5 * 60_000);
+    }
   };
 
   const handleTriggerTestAlarm = (session?: LessonSession) => {
-    const target = session || sessions[0];
-    const tone = target?.alarmTone || settings.alarmTone;
+    const target = session || getNextUpcomingSession(sessions) || sessions[0];
     const duration = settings.alarmDurationSeconds || 30;
-
+    isTestAlarm.current = true;
+    ringingSessionId.current = null;
     setActiveAlarm({
       isRinging: true,
       session: target,
-      remainingSeconds: 600, // 10 minutes warning
+      remainingSeconds: target
+        ? Math.max(0, Math.floor((sessionEpochMs(target) - Date.now()) / 1000))
+        : 600,
       soundPlaying: true,
     });
-
     setIsSoundPlaying(true);
     setSoundRemainingSeconds(duration);
-
     startLoopingAlarm(
-      tone,
+      target?.alarmTone || settings.alarmTone,
       settings.alarmVolume,
       duration,
       (sec) => setSoundRemainingSeconds(sec),
-      () => {
-        setIsSoundPlaying(false);
-      }
+      () => setIsSoundPlaying(false)
     );
   };
 
@@ -256,52 +351,49 @@ export default function App() {
     if (isSoundPlaying) {
       handleStopSound();
     } else {
-      const tone = settings.alarmTone;
       const duration = settings.alarmDurationSeconds || 30;
       setIsSoundPlaying(true);
       setSoundRemainingSeconds(duration);
-
       startLoopingAlarm(
-        tone,
+        settings.alarmTone,
         settings.alarmVolume,
         duration,
         (sec) => setSoundRemainingSeconds(sec),
-        () => {
-          setIsSoundPlaying(false);
-        }
+        () => setIsSoundPlaying(false)
       );
     }
   };
 
-  // Session Handlers with Live Firebase persistence
+  // Session handlers — writes go to Firestore immediately (reads are limited, not writes)
   const handleSaveSession = async (newOrUpdated: Partial<LessonSession>) => {
     try {
-      // Determine dayName from session date
-      const targetDate = new Date(newOrUpdated.date || selectedDate);
-      const dayIdx = (targetDate.getDay() + 6) % 7; // Monday = 0
+      const targetDate = parseISODateAsLocal(newOrUpdated.date || selectedDate);
+      const dayIdx = (targetDate.getDay() + 6) % 7;
       const dayName = DAY_NAMES[dayIdx] || 'Monday';
+      const weekStart = formatDateISO(getMondayOfWeek(targetDate));
 
-      if (editingSession) {
-        // Optimistic UI update
+      if (
+        editingSession &&
+        newOrUpdated.id === editingSession.id &&
+        !editingSession.id.startsWith('sess-')
+      ) {
         setSessions((prev) =>
           prev.map((s) => (s.id === newOrUpdated.id ? ({ ...s, ...newOrUpdated } as LessonSession) : s))
         );
-
-        // Update in live Firestore
-        if (newOrUpdated.id && !newOrUpdated.id.startsWith('sess-local')) {
-          await updateSessionInLive(newOrUpdated.id, newOrUpdated, dayName);
+        if (newOrUpdated.id && !newOrUpdated.id.startsWith('sess-')) {
+          await updateSessionInLive(newOrUpdated.id, newOrUpdated, dayName, weekStart);
         }
       } else {
-        // Add to live Firestore
-        const docId = await addSessionToLive(newOrUpdated, currentWeekStart, dayName);
-        const completeSession: LessonSession = {
-          ...newOrUpdated,
-          id: docId,
-        } as LessonSession;
+        const docId = await addSessionToLive(newOrUpdated, weekStart, dayName);
+        const completeSession: LessonSession = { ...newOrUpdated, id: docId } as LessonSession;
         setSessions((prev) => [completeSession, ...prev]);
       }
     } catch (err) {
       console.warn('Error saving session to live database:', err);
+      // Keep the local copy so it still works offline
+      if (!editingSession) {
+        setSessions((prev) => [newOrUpdated as LessonSession, ...prev]);
+      }
     } finally {
       setIsAddModalOpen(false);
       setEditingSession(null);
@@ -311,7 +403,7 @@ export default function App() {
   const handleDeleteSession = async (sessionId: string) => {
     try {
       setSessions((prev) => prev.filter((s) => s.id !== sessionId));
-      await deleteSessionInLive(sessionId);
+      if (!sessionId.startsWith('sess-')) await deleteSessionInLive(sessionId);
     } catch (err) {
       console.warn('Error deleting from live database:', err);
     }
@@ -323,7 +415,7 @@ export default function App() {
       prev.map((s) => (s.id === session.id ? { ...s, isCompleted: updated } : s))
     );
     try {
-      await toggleSessionCompletedInLive(session.id, updated);
+      if (!session.id.startsWith('sess-')) await toggleSessionCompletedInLive(session.id, updated);
     } catch (err) {
       console.warn('Error updating complete status in live database:', err);
     }
@@ -355,26 +447,24 @@ export default function App() {
       isCompleted: false,
       alarmEnabled: true,
       alarmTone: settings.alarmTone,
-      alarmNoticeMinutes: 10,
+      alarmNoticeMinutes: settings.defaultAlarmNoticeMinutes || 15,
     });
     setIsAddModalOpen(true);
   };
 
-  // Student Handlers
   const handleSaveNewStudent = (student: Student) => {
     setStudents((prev) => [student, ...prev]);
   };
 
-  // Settings Handlers
   const handleUpdateSettings = (partial: Partial<AppSettings>) => {
     setSettings((prev) => ({ ...prev, ...partial }));
   };
 
   const handleResetData = () => {
-    if (window.confirm('Reset all cached settings and reload from tutor-schedule-90593?')) {
+    if (window.confirm('Reset cached settings and re-sync from tutor-schedule-90593?')) {
       stopLoopingAlarm();
       setSettings(DEFAULT_SETTINGS);
-      loadAllStudents();
+      syncFromCloud(true);
     }
   };
 
@@ -383,12 +473,11 @@ export default function App() {
     setSessions(data.sessions);
   };
 
-  const monthHeader = formatMonthHeader(new Date(selectedDate));
+  const monthHeader = formatMonthHeader(parseISODateAsLocal(selectedDate));
 
   return (
     <div className="flex justify-center min-h-screen p-0 sm:p-4 bg-[#fff8f7] selection:bg-[#ffd8e1]">
       <div className="w-full max-w-md bg-[#fff8f7] text-[#1f1a1c] min-h-screen flex flex-col shadow-xl sm:rounded-3xl overflow-hidden pb-20 relative border border-[#ffd8e1]/40">
-        {/* Top Header */}
         <Header
           currentMonth={monthHeader}
           onMonthClick={handleCurrentWeek}
@@ -399,7 +488,7 @@ export default function App() {
           isSyncing={isSyncing}
         />
 
-        {/* Global Floating Mini Alert Bar if alarm is ringing and user is on another tab */}
+        {/* Floating alert bar when the alarm is ringing on another tab */}
         {activeAlarm.isRinging && currentTab !== 'alarms' && (
           <div
             onClick={() => setCurrentTab('alarms')}
@@ -408,9 +497,9 @@ export default function App() {
             <div className="flex items-center gap-2">
               <span className="material-symbols-outlined text-base animate-bounce">alarm</span>
               <span>
-                {activeAlarm.session?.studentName || 'Tutoring Alert'} • {strings.inMinutes(10)} (
+                {activeAlarm.session?.studentName || 'Tutoring Alert'} •{' '}
                 {Math.floor(activeAlarm.remainingSeconds / 60)}:
-                {String(activeAlarm.remainingSeconds % 60).padStart(2, '0')})
+                {String(activeAlarm.remainingSeconds % 60).padStart(2, '0')} {strings.remaining}
               </span>
             </div>
             <span className="bg-white/20 px-2 py-0.5 rounded-full text-[10px]">
@@ -419,11 +508,27 @@ export default function App() {
           </div>
         )}
 
-        {/* Main Content Area based on currentTab */}
         <main className="flex-1 flex flex-col">
+          {currentTab === 'next' && (
+            <NextClassView
+              sessions={sessions}
+              settings={settings}
+              syncMeta={syncMeta}
+              isSyncing={isSyncing}
+              onSyncNow={handleSyncNow}
+              onOpenSchedule={() => setCurrentTab('schedule')}
+              onTriggerAlarmForSession={handleTriggerTestAlarm}
+            />
+          )}
+
           {currentTab === 'schedule' && (
             <ScheduleView
-              sessions={sessions}
+              sessions={sessions.filter((s) => {
+                const d = parseISODateAsLocal(s.date);
+                const end = new Date(mondayDate);
+                end.setDate(end.getDate() + 7);
+                return d >= mondayDate && d < end;
+              })}
               mondayDate={mondayDate}
               selectedDate={selectedDate}
               onSelectDate={(date) => setSelectedDate(date)}
@@ -477,22 +582,19 @@ export default function App() {
               sessions={sessions}
               onImportData={handleImportData}
               isLiveConnected={isLiveConnected}
-              onRefreshLive={() => {
-                loadAllStudents();
-                handleCurrentWeek();
-              }}
+              onRefreshLive={handleSyncNow}
+              syncMeta={syncMeta}
+              isSyncing={isSyncing}
             />
           )}
         </main>
 
-        {/* Bottom Navigation */}
         <Navigation
           currentTab={currentTab}
           onTabChange={(tab) => setCurrentTab(tab)}
           alarmActive={activeAlarm.isRinging}
         />
 
-        {/* Add / Edit Session Modal */}
         <AddSessionModal
           isOpen={isAddModalOpen}
           onClose={() => {
@@ -505,16 +607,15 @@ export default function App() {
           students={students}
           onOpenNewStudentModal={() => setIsNewStudentModalOpen(true)}
           defaultDate={selectedDate}
+          defaultNoticeMinutes={settings.defaultAlarmNoticeMinutes || 15}
         />
 
-        {/* New Student Modal */}
         <NewStudentModal
           isOpen={isNewStudentModalOpen}
           onClose={() => setIsNewStudentModalOpen(false)}
           onSave={handleSaveNewStudent}
         />
 
-        {/* Message Student Modal */}
         <MessageModal
           isOpen={!!selectedStudentForMessage}
           onClose={() => setSelectedStudentForMessage(null)}

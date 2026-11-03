@@ -4,17 +4,16 @@ import {
   collection,
   query,
   where,
-  onSnapshot,
   doc,
   updateDoc,
   addDoc,
   deleteDoc,
   getDocs,
   Firestore,
-  Unsubscribe,
 } from 'firebase/firestore';
 import { getAuth, signInAnonymously, Auth } from 'firebase/auth';
 import { LessonSession, Student, GradeLevel } from '../types';
+import { parseISODateAsLocal } from '../utils/timezone';
 
 export const FIREBASE_CONFIG = {
   apiKey: 'AIzaSyAoaLsLkyfdE9u6jh4If2oho1yCnJLB6Js',
@@ -58,17 +57,30 @@ export const DAY_NAMES = [
 
 export type DayName = (typeof DAY_NAMES)[number];
 
-// Calculate the Monday of the week for any given Date
+const MONTHS_SHORT = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+const MONTHS_LONG = [
+  'January', 'February', 'March', 'April', 'May', 'June',
+  'July', 'August', 'September', 'October', 'November', 'December',
+];
+
+/** Convert any instant to a Date whose local Y/M/D fields equal the Manila calendar day. */
+function toManilaWallDate(input: Date | string): Date {
+  if (typeof input === 'string') return parseISODateAsLocal(input);
+  const manila = new Date(input.getTime() + (input.getTimezoneOffset() + 8 * 60) * 60_000);
+  return new Date(manila.getFullYear(), manila.getMonth(), manila.getDate());
+}
+
+/** Monday of the Manila-time week for any given instant / ISO date. */
 export function getMondayOfWeek(dateInput: Date | string): Date {
-  const d = new Date(dateInput);
-  const day = d.getDay(); // 0 is Sunday, 1 is Monday, ...
+  const d = toManilaWallDate(dateInput);
+  const day = d.getDay(); // 0 Sunday .. 6 Saturday
   const diff = (day === 0 ? -6 : 1) - day;
   d.setDate(d.getDate() + diff);
   d.setHours(0, 0, 0, 0);
   return d;
 }
 
-// Convert Date to YYYY-MM-DD
+/** YYYY-MM-DD from a Manila-wall Date (uses local fields, no timezone shift). */
 export function formatDateISO(date: Date): string {
   const y = date.getFullYear();
   const m = String(date.getMonth() + 1).padStart(2, '0');
@@ -76,54 +88,48 @@ export function formatDateISO(date: Date): string {
   return `${y}-${m}-${d}`;
 }
 
-// Format week label like "Nov 02 - Nov 08" or "Jul 06 - Jul 12"
 export function formatWeekLabel(mondayDate: Date): string {
   const sundayDate = new Date(mondayDate);
   sundayDate.setDate(sundayDate.getDate() + 6);
-
-  const startMonth = mondayDate.toLocaleDateString('en-US', { month: 'short' });
+  const startMonth = MONTHS_SHORT[mondayDate.getMonth()];
   const startDay = String(mondayDate.getDate()).padStart(2, '0');
-  const endMonth = sundayDate.toLocaleDateString('en-US', { month: 'short' });
+  const endMonth = MONTHS_SHORT[sundayDate.getMonth()];
   const endDay = String(sundayDate.getDate()).padStart(2, '0');
-
-  if (startMonth === endMonth) {
-    return `${startMonth} ${startDay} - ${endDay}`;
-  }
+  if (startMonth === endMonth) return `${startMonth} ${startDay} - ${endDay}`;
   return `${startMonth} ${startDay} - ${endMonth} ${endDay}`;
 }
 
-// Format month header like "November 2026"
 export function formatMonthHeader(date: Date): string {
-  return date.toLocaleDateString('en-US', { month: 'long', year: 'numeric' });
+  return `${MONTHS_LONG[date.getMonth()]} ${date.getFullYear()}`;
 }
 
-// Generate the 7 days of the week starting from Monday
 export function getWeekDates(mondayDate: Date) {
   return DAY_NAMES.map((name, index) => {
     const current = new Date(mondayDate);
     current.setDate(current.getDate() + index);
-    const dateStr = formatDateISO(current);
-    const dayNumber = String(current.getDate()).padStart(2, '0');
-    const shortDayName = name.slice(0, 3); // "Mon", "Tue", ...
     return {
       dayName: name,
-      shortName: shortDayName,
-      dateStr,
-      dayNumber,
+      shortName: name.slice(0, 3),
+      dateStr: formatDateISO(current),
+      dayNumber: String(current.getDate()).padStart(2, '0'),
       fullDate: current,
     };
   });
 }
 
-// Map Firestore document data to our LessonSession type
+/** Map a Firestore doc to a LessonSession using the doc's own weekStart. */
 export function mapFirestoreDocToSession(
   docId: string,
   raw: Record<string, unknown>,
-  mondayDate: Date
+  mondayDate?: Date
 ): LessonSession {
+  const monday =
+    mondayDate ||
+    getMondayOfWeek(typeof raw.weekStart === 'string' ? (raw.weekStart as string) : new Date());
+
   const dayName = (raw.day as DayName) || 'Monday';
   const dayIndex = DAY_NAMES.indexOf(dayName);
-  const sessionDate = new Date(mondayDate);
+  const sessionDate = new Date(monday);
   sessionDate.setDate(sessionDate.getDate() + (dayIndex >= 0 ? dayIndex : 0));
   const dateStr = formatDateISO(sessionDate);
 
@@ -135,7 +141,7 @@ export function mapFirestoreDocToSession(
 
   const time = (raw.time as string) || '09:00';
   const [hStr, mStr] = time.split(':');
-  let hNum = parseInt(hStr || '9', 10);
+  const hNum = parseInt(hStr || '9', 10);
   const isPm = hNum >= 12;
   const h12 = hNum % 12 || 12;
   const displayTime = `${String(h12).padStart(2, '0')}:${mStr || '00'} ${isPm ? 'PM' : 'AM'}`;
@@ -164,144 +170,108 @@ export function mapFirestoreDocToSession(
     tag,
     alarmEnabled: true,
     alarmTone: 'chime',
-    alarmNoticeMinutes: 10,
+    // No per-session notice from the website → use the app's default (15 min)
   };
 }
 
-// Subscribe to real-time sessions for a specific weekStart (e.g. "2026-11-02")
-export function subscribeToWeekSessions(
-  weekStart: string,
-  mondayDate: Date,
-  onSuccess: (sessions: LessonSession[]) => void,
-  onError: (err: Error) => void
-): Unsubscribe {
-  const { db, authPromise } = getFirebaseInstance();
-
-  let unsubscribe: Unsubscribe = () => {};
-
-  (authPromise || Promise.resolve()).then(() => {
-    if (!db) return;
-    try {
-      const sessionsRef = collection(db, 'sessions');
-      const q = query(sessionsRef, where('weekStart', '==', weekStart));
-
-      unsubscribe = onSnapshot(
-        q,
-        (snapshot) => {
-          const sessions = snapshot.docs.map((docSnap) =>
-            mapFirestoreDocToSession(docSnap.id, docSnap.data(), mondayDate)
-          );
-          onSuccess(sessions);
-        },
-        (error) => {
-          console.error('Firestore onSnapshot error:', error);
-          onError(error);
-        }
-      );
-    } catch (e) {
-      console.error('Subscribe setup error:', e);
-      onError(e as Error);
-    }
-  });
-
-  return () => {
-    if (unsubscribe) unsubscribe();
-  };
-}
-
-// Fetch all sessions across all weeks once to populate all student profiles
-export async function fetchAllStudentsFromFirestore(): Promise<Student[]> {
+/**
+ * Read the entire sessions collection ONCE (no live listener).
+ * Used by the once-daily sync to stay within Firebase read limits.
+ */
+export async function fetchAllSessionsOnce(): Promise<LessonSession[]> {
   const { db, authPromise } = getFirebaseInstance();
   await (authPromise || Promise.resolve());
   if (!db) return [];
+  const snapshot = await getDocs(collection(db, 'sessions'));
+  return snapshot.docs.map((d) => mapFirestoreDocToSession(d.id, d.data()));
+}
 
-  try {
-    const sessionsRef = collection(db, 'sessions');
-    const snapshot = await getDocs(sessionsRef);
+/** One-time read of a single week (kept for optional manual refresh). */
+export async function fetchWeekSessionsOnce(weekStart: string): Promise<LessonSession[]> {
+  const { db, authPromise } = getFirebaseInstance();
+  await (authPromise || Promise.resolve());
+  if (!db) return [];
+  const monday = getMondayOfWeek(weekStart);
+  const q = query(collection(db, 'sessions'), where('weekStart', '==', weekStart));
+  const snapshot = await getDocs(q);
+  return snapshot.docs.map((d) => mapFirestoreDocToSession(d.id, d.data(), monday));
+}
 
-    const studentMap = new Map<
-      string,
-      {
-        name: string;
-        grade: GradeLevel;
-        sessionsCount: number;
-        days: Set<string>;
-        subjects: Set<string>;
-      }
-    >();
+const AVATAR_COLORS = [
+  'bg-[#fff0f2] text-[#be185d]',
+  'bg-blue-50 text-blue-700',
+  'bg-purple-50 text-purple-700',
+  'bg-emerald-50 text-emerald-700',
+  'bg-amber-50 text-amber-700',
+  'bg-teal-50 text-teal-700',
+  'bg-indigo-50 text-indigo-700',
+];
 
-    snapshot.docs.forEach((docSnap) => {
-      const data = docSnap.data();
-      const rawName = (data.student as string) || '';
-      const cleanName = rawName.trim();
-      if (!cleanName) return;
+/** Derive the student directory from already-fetched sessions (no extra reads). */
+export function deriveStudentsFromSessions(sessions: LessonSession[]): Student[] {
+  const studentMap = new Map<
+    string,
+    { name: string; grade: GradeLevel; count: number; days: Set<string>; subjects: Set<string> }
+  >();
 
-      const gradeDigits = String(data.grade || '').replace(/[^0-9]/g, '');
-      const parsedGrade = parseInt(gradeDigits, 10);
-      const grade: GradeLevel =
-        parsedGrade >= 1 && parsedGrade <= 12 ? (parsedGrade as GradeLevel) : 7;
+  for (const s of sessions) {
+    const cleanName = s.studentName.trim();
+    if (!cleanName) continue;
+    // Key by the slug id so name variants ("Adrian Yirga" / "adrian yirga")
+    // merge into one student instead of producing duplicate React keys.
+    const slug = `s-${cleanName.toLowerCase().replace(/[^a-z0-9]/g, '-')}`;
+    const dayName = DAY_NAMES[(parseISODateAsLocal(s.date).getDay() + 6) % 7];
+    const existing = studentMap.get(slug);
+    if (existing) {
+      existing.count += 1;
+      existing.days.add(dayName);
+      existing.subjects.add(s.subject);
+    } else {
+      studentMap.set(slug, {
+        name: cleanName,
+        grade: s.grade,
+        count: 1,
+        days: new Set([dayName]),
+        subjects: new Set([s.subject]),
+      });
+    }
+  }
 
-      const existing = studentMap.get(cleanName);
-      if (existing) {
-        existing.sessionsCount += 1;
-        if (data.day) existing.days.add(data.day as string);
-        if (data.subject) existing.subjects.add(data.subject as string);
-      } else {
-        studentMap.set(cleanName, {
-          name: cleanName,
-          grade,
-          sessionsCount: 1,
-          days: new Set(data.day ? [data.day as string] : []),
-          subjects: new Set(data.subject ? [data.subject as string] : ['Math']),
-        });
-      }
-    });
-
-    const colors = [
-      'bg-[#fff0f2] text-[#be185d]',
-      'bg-blue-50 text-blue-700',
-      'bg-purple-50 text-purple-700',
-      'bg-emerald-50 text-emerald-700',
-      'bg-amber-50 text-amber-700',
-      'bg-teal-50 text-teal-700',
-      'bg-indigo-50 text-indigo-700',
-    ];
-
-    const students: Student[] = Array.from(studentMap.values()).map((s, idx) => {
+  return Array.from(studentMap.values())
+    .map((s, idx) => {
       const dayList = Array.from(s.days).slice(0, 3).join(', ');
       return {
         id: `s-${s.name.toLowerCase().replace(/[^a-z0-9]/g, '-')}`,
         name: s.name,
         grade: s.grade,
-        sessionsPerWeek: s.sessionsCount > 1 ? s.days.size || 2 : 1,
+        sessionsPerWeek: s.count > 1 ? s.days.size || 2 : 1,
         scheduleSummary: dayList ? `${dayList} (Weekly)` : 'Scheduled Session',
         isVerified: !s.name.toLowerCase().includes('reserved'),
-        avatarColor: colors[idx % colors.length],
-        notes: `Registered student in tutor-schedule-90593. Total lessons: ${s.sessionsCount}`,
-      };
-    });
+        avatarColor: AVATAR_COLORS[idx % AVATAR_COLORS.length],
+        notes: `Registered student in tutor-schedule-90593. Total lessons: ${s.count}`,
+      } as Student;
+    })
+    .sort((a, b) => a.name.localeCompare(b.name));
+}
 
-    // Sort students alphabetically
-    return students.sort((a, b) => a.name.localeCompare(b.name));
+/** Backwards-compatible helper: fetch all sessions then derive students. */
+export async function fetchAllStudentsFromFirestore(): Promise<Student[]> {
+  try {
+    const sessions = await fetchAllSessionsOnce();
+    return deriveStudentsFromSessions(sessions);
   } catch (err) {
-    console.warn('Error fetching all students from Firestore:', err);
+    console.warn('Error fetching students from Firestore:', err);
     return [];
   }
 }
 
-// Toggle session completed status in live Firestore
-export async function toggleSessionCompletedInLive(
-  docId: string,
-  newCompleted: boolean
-): Promise<void> {
+export async function toggleSessionCompletedInLive(docId: string, newCompleted: boolean): Promise<void> {
   const { db, authPromise } = getFirebaseInstance();
   await (authPromise || Promise.resolve());
   if (!db) return;
-  const docRef = doc(db, 'sessions', docId);
-  await updateDoc(docRef, { completed: newCompleted });
+  await updateDoc(doc(db, 'sessions', docId), { completed: newCompleted });
 }
 
-// Add a new session directly to tutor-schedule-90593 Firestore
 export async function addSessionToLive(
   session: Partial<LessonSession>,
   weekStart: string,
@@ -310,8 +280,6 @@ export async function addSessionToLive(
   const { db, authPromise } = getFirebaseInstance();
   await (authPromise || Promise.resolve());
   if (!db) throw new Error('Firestore not initialized');
-
-  const sessionsRef = collection(db, 'sessions');
   const data = {
     student: session.studentName || 'Student',
     day: dayName,
@@ -323,23 +291,20 @@ export async function addSessionToLive(
     duration: session.durationMinutes || 60,
     weekStart,
   };
-
-  const docRef = await addDoc(sessionsRef, data);
+  const docRef = await addDoc(collection(db, 'sessions'), data);
   return docRef.id;
 }
 
-// Update existing session in tutor-schedule-90593 Firestore
 export async function updateSessionInLive(
   docId: string,
   session: Partial<LessonSession>,
-  dayName: string
+  dayName: string,
+  weekStart?: string
 ): Promise<void> {
   const { db, authPromise } = getFirebaseInstance();
   await (authPromise || Promise.resolve());
   if (!db) throw new Error('Firestore not initialized');
-
-  const docRef = doc(db, 'sessions', docId);
-  await updateDoc(docRef, {
+  await updateDoc(doc(db, 'sessions', docId), {
     student: session.studentName,
     day: dayName,
     time: session.time,
@@ -348,15 +313,13 @@ export async function updateSessionInLive(
     note: session.topic || session.notes || '',
     completed: Boolean(session.isCompleted),
     duration: session.durationMinutes || 60,
+    ...(weekStart ? { weekStart } : {}),
   });
 }
 
-// Delete session in live Firestore
 export async function deleteSessionInLive(docId: string): Promise<void> {
   const { db, authPromise } = getFirebaseInstance();
   await (authPromise || Promise.resolve());
   if (!db) throw new Error('Firestore not initialized');
-
-  const docRef = doc(db, 'sessions', docId);
-  await deleteDoc(docRef);
+  await deleteDoc(doc(db, 'sessions', docId));
 }

@@ -1,5 +1,6 @@
-import React from 'react';
+import React, { useEffect, useState } from 'react';
 import { strings } from '../utils/translations';
+import { formatManilaClock } from '../utils/timezone';
 
 interface HeaderProps {
   currentMonth: string;
@@ -20,6 +21,12 @@ export const Header: React.FC<HeaderProps> = ({
   isLiveConnected,
   isSyncing,
 }) => {
+  const [clock, setClock] = useState(() => formatManilaClock());
+  useEffect(() => {
+    const t = window.setInterval(() => setClock(formatManilaClock()), 1000);
+    return () => window.clearInterval(t);
+  }, []);
+
   return (
     <header className="flex items-center justify-between px-5 py-4 border-b border-[#ffd8e1]/40 bg-white/80 backdrop-blur-md sticky top-0 z-20">
       <div className="flex items-center gap-2">
@@ -30,24 +37,26 @@ export const Header: React.FC<HeaderProps> = ({
         >
           <span className="material-symbols-outlined text-[#be185d] text-lg">calendar_month</span>
           <span className="text-xs font-bold text-[#be185d]">{currentMonth}</span>
-          <span className="material-symbols-outlined text-[#be185d] text-base">expand_more</span>
         </button>
 
-        {/* Live Firebase Sync Badge */}
+        {/* Manila clock + daily sync badge */}
         <div
-          title={isLiveConnected ? strings.liveSyncConnected : 'Connecting to database...'}
-          className="hidden sm:flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-emerald-50 border border-emerald-200 text-emerald-800 text-[10px] font-bold"
+          title={strings.timesInManila}
+          className="flex flex-col items-start px-2.5 py-1 rounded-full bg-emerald-50 border border-emerald-200 text-emerald-800"
         >
-          <span
-            className={`w-2 h-2 rounded-full ${
-              isSyncing
-                ? 'bg-amber-500 animate-ping'
-                : isLiveConnected
-                ? 'bg-emerald-500'
-                : 'bg-gray-400'
-            }`}
-          />
-          <span>{isSyncing ? strings.syncing : 'Live'}</span>
+          <span className="text-[10px] font-black tabular-nums leading-tight">{clock}</span>
+          <span className="text-[8px] font-bold leading-tight flex items-center gap-1">
+            <span
+              className={`w-1.5 h-1.5 rounded-full ${
+                isSyncing
+                  ? 'bg-amber-500 animate-ping'
+                  : isLiveConnected
+                  ? 'bg-emerald-500'
+                  : 'bg-gray-400'
+              }`}
+            />
+            {isSyncing ? strings.syncing : 'Manila • Daily sync'}
+          </span>
         </div>
       </div>
 
