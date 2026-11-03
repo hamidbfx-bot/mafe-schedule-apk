@@ -6,7 +6,12 @@ const STORAGE_KEYS = {
   STUDENTS: 'tutor_schedule_students_v1',
   SETTINGS: 'tutor_schedule_settings_v1',
   SYNC_META: 'tutor_schedule_sync_meta_v1',
+  SCHEMA: 'tutor_schedule_schema_version',
 };
+
+// Bumped to 2 when we started filtering sessions by exact weekStart (like the
+// website). Old caches must be re-synced once so orphan documents disappear.
+const CURRENT_SCHEMA = 2;
 
 export const INITIAL_STUDENTS: Student[] = [
   {
@@ -295,7 +300,25 @@ export function saveSyncMeta(meta: SyncMeta): void {
 export function shouldSyncToday(): boolean {
   const meta = loadSyncMeta();
   if (!meta) return true;
-  return meta.lastSyncDate !== manilaTodayISO();
+  if (meta.lastSyncDate !== manilaTodayISO()) return true;
+  // One-time forced re-sync after the weekStart schema change, even if we
+  // already synced today, so stale/orphan cached sessions are replaced.
+  try {
+    const v = parseInt(localStorage.getItem(STORAGE_KEYS.SCHEMA) || '0', 10);
+    if (v < CURRENT_SCHEMA) return true;
+  } catch {
+    return true;
+  }
+  return false;
+}
+
+/** Record that the cache now uses the current schema (call after a good sync). */
+export function markSyncSchema(): void {
+  try {
+    localStorage.setItem(STORAGE_KEYS.SCHEMA, String(CURRENT_SCHEMA));
+  } catch {
+    // ignore
+  }
 }
 
 export function loadStoredStudents(): Student[] {

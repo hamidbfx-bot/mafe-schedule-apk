@@ -16,6 +16,7 @@ import {
   saveStoredSettings,
   saveStoredStudents,
   saveSyncMeta,
+  markSyncSchema,
   shouldSyncToday,
 } from './utils/storage';
 import {
@@ -132,6 +133,7 @@ export default function App() {
       setStudents(deriveStudentsFromSessions(cloudSessions));
       const meta: SyncMeta = { lastSyncAt: Date.now(), lastSyncDate: manilaTodayISO() };
       saveSyncMeta(meta);
+      markSyncSchema();
       setSyncMeta(meta);
       setIsLiveConnected(true);
     } catch (err) {
@@ -523,12 +525,7 @@ export default function App() {
 
           {currentTab === 'schedule' && (
             <ScheduleView
-              sessions={sessions.filter((s) => {
-                const d = parseISODateAsLocal(s.date);
-                const end = new Date(mondayDate);
-                end.setDate(end.getDate() + 7);
-                return d >= mondayDate && d < end;
-              })}
+              sessions={sessions.filter((s) => s.weekStart === currentWeekStart)}
               mondayDate={mondayDate}
               selectedDate={selectedDate}
               onSelectDate={(date) => setSelectedDate(date)}

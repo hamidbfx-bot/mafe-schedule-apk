@@ -123,15 +123,21 @@ export function mapFirestoreDocToSession(
   raw: Record<string, unknown>,
   mondayDate?: Date
 ): LessonSession {
+  // Keep the RAW weekStart exactly as stored. The website only ever shows a
+  // session when its weekStart === the viewed Monday, so we must NOT guess a
+  // week for documents that have no weekStart (they are hidden on the site).
+  const rawWeekStart = typeof raw.weekStart === 'string' ? raw.weekStart : '';
   const monday =
-    mondayDate ||
-    getMondayOfWeek(typeof raw.weekStart === 'string' ? (raw.weekStart as string) : new Date());
+    mondayDate || (rawWeekStart ? getMondayOfWeek(rawWeekStart) : null);
 
   const dayName = (raw.day as DayName) || 'Monday';
   const dayIndex = DAY_NAMES.indexOf(dayName);
-  const sessionDate = new Date(monday);
-  sessionDate.setDate(sessionDate.getDate() + (dayIndex >= 0 ? dayIndex : 0));
-  const dateStr = formatDateISO(sessionDate);
+  let dateStr = '';
+  if (monday) {
+    const sessionDate = new Date(monday);
+    sessionDate.setDate(sessionDate.getDate() + (dayIndex >= 0 ? dayIndex : 0));
+    dateStr = formatDateISO(sessionDate);
+  }
 
   const rawGrade = String(raw.grade || 'Grade 7');
   const gradeDigits = rawGrade.replace(/[^0-9]/g, '');
@@ -159,8 +165,10 @@ export function mapFirestoreDocToSession(
     studentId: `s-${studentName.toLowerCase().replace(/[^a-z0-9]/g, '-')}`,
     studentName,
     grade: gradeLevel,
+    gradeLabel: rawGrade,
     subject: (raw.subject as string) || 'Math',
     topic: (raw.note as string) || (raw.subject as string) || 'Math Session',
+    weekStart: rawWeekStart,
     date: dateStr,
     time: time.length === 4 ? `0${time}` : time,
     displayTime,
@@ -177,13 +185,28 @@ export function mapFirestoreDocToSession(
 /**
  * Read the entire sessions collection ONCE (no live listener).
  * Used by the once-daily sync to stay within Firebase read limits.
+ *
+ * IMPORTANT — mirror the website exactly:
+ * the site only renders a session when it has a valid `weekStart` (it filters
+ * `e.weekStart === currentWeekStart()`) AND a valid `time` (HH:MM). Documents
+ * with a missing weekStart are NEVER shown on the website, so we drop them here
+ * too instead of guessing that they belong to the current week.
  */
 export async function fetchAllSessionsOnce(): Promise<LessonSession[]> {
   const { db, authPromise } = getFirebaseInstance();
   await (authPromise || Promise.resolve());
   if (!db) return [];
   const snapshot = await getDocs(collection(db, 'sessions'));
-  return snapshot.docs.map((d) => mapFirestoreDocToSession(d.id, d.data()));
+  const sessions: LessonSession[] = [];
+  for (const d of snapshot.docs) {
+    const raw = d.data();
+    const rawWeekStart = typeof raw.weekStart === 'string' ? raw.weekStart : '';
+    const rawTime = typeof raw.time === 'string' ? raw.time : '';
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(rawWeekStart)) continue; // hidden on website
+    if (!/^\d{1,2}:\d{2}$/.test(rawTime)) continue; // hidden on website
+    sessions.push(mapFirestoreDocToSession(d.id, raw));
+  }
+  return sessions;
 }
 
 /** One-time read of a single week (kept for optional manual refresh). */

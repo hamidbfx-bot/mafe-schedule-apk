@@ -213,14 +213,12 @@ export const ScheduleView: React.FC<ScheduleViewProps> = ({
 
                     <p className="text-xs text-gray-500 mt-1 line-clamp-1">
                       <span className="font-semibold text-gray-700">{session.subject}</span>
-                      {session.topic && session.topic !== session.subject
-                        ? ` • ${session.topic}`
-                        : ''}
+                      {` • ${session.gradeLabel || `Grade ${session.grade}`}`}
                     </p>
 
-                    {session.notes && session.notes !== session.topic && (
-                      <p className="text-[11px] text-gray-400 italic mt-0.5 line-clamp-1">
-                        &quot;{session.notes}&quot;
+                    {session.notes && (
+                      <p className="text-[11px] text-gray-400 italic mt-0.5 line-clamp-2">
+                        {session.notes}
                       </p>
                     )}
                   </div>

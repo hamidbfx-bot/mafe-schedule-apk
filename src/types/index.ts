@@ -20,8 +20,10 @@ export interface LessonSession {
   studentId: string;
   studentName: string;
   grade: GradeLevel;
+  gradeLabel?: string; // raw grade text from the website, e.g. "Garde 9"
   subject: string;
   topic: string;
+  weekStart?: string; // raw YYYY-MM-DD Monday from Firestore (exact match, like the website)
   date: string; // YYYY-MM-DD
   time: string; // HH:MM (24h)
   displayTime: string; // e.g. "09:00 AM" or "09:00"
