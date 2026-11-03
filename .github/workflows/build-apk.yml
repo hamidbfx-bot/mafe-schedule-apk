@@ -17,7 +17,7 @@ jobs:
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: 20
+          node-version: 22
 
       - name: Setup Java JDK
         uses: actions/setup-java@v4
@@ -26,22 +26,52 @@ jobs:
           java-version: '21'
 
       - name: Install dependencies
-        run: |
-          npm install --legacy-peer-deps
-          npm install --legacy-peer-deps @capacitor/core @capacitor/android @capacitor/cli
+        run: npm install --legacy-peer-deps
 
       - name: Build Web Application
         run: npm run build
 
       - name: Initialize & Sync Capacitor Android
         run: |
-          if [ ! -f "capacitor.config.json" ]; then
-            echo '{"appId":"com.tutorschedule.app","appName":"Tutor Schedule","webDir":"dist"}' > capacitor.config.json
-          fi
           if [ ! -d "android" ]; then
-            npx @capacitor/cli add android
+            npx cap add android
           fi
-          npx @capacitor/cli sync android
+          npx cap sync android
+
+      - name: Add alarm sound resource
+        run: |
+          mkdir -p android/app/src/main/res/raw
+          cp native-assets/alarm.wav android/app/src/main/res/raw/alarm.wav
+
+      - name: Add notification & exact-alarm permissions
+        run: |
+          python3 - <<'PYEOF'
+          import re
+          path = 'android/app/src/main/AndroidManifest.xml'
+          with open(path, 'r', encoding='utf-8') as f:
+              manifest = f.read()
+
+          permissions = [
+              'android.permission.POST_NOTIFICATIONS',
+              'android.permission.SCHEDULE_EXACT_ALARM',
+              'android.permission.USE_EXACT_ALARM',
+              'android.permission.RECEIVE_BOOT_COMPLETED',
+              'android.permission.WAKE_LOCK',
+              'android.permission.VIBRATE',
+          ]
+          to_add = ''
+          for perm in permissions:
+              if perm not in manifest:
+                  to_add += f'    <uses-permission android:name="{perm}" />\n'
+
+          if to_add:
+              manifest = manifest.replace('<application', to_add + '\n    <application', 1)
+              with open(path, 'w', encoding='utf-8') as f:
+                  f.write(manifest)
+              print('Added permissions:\n' + to_add)
+          else:
+              print('All permissions already present.')
+          PYEOF
 
       - name: Make gradlew executable
         run: chmod +x android/gradlew
