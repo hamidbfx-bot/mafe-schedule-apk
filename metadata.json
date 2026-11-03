@@ -1,0 +1,6 @@
+{
+  "name": "Tutor Schedule - Teacher Planner & Alarms",
+  "description": "Comprehensive tutor scheduling app with timeline slots, tiered alarm notifications, students directory, and wake override.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
