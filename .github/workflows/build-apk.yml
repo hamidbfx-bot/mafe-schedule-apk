@@ -26,17 +26,22 @@ jobs:
           java-version: '17'
 
       - name: Install dependencies
-        run: npm install --legacy-peer-deps
+        run: |
+          npm install --legacy-peer-deps
+          npm install --legacy-peer-deps @capacitor/core @capacitor/android @capacitor/cli
 
       - name: Build Web Application
         run: npm run build
 
       - name: Initialize & Sync Capacitor Android
         run: |
-          if [ ! -d "android" ]; then
-            npx cap add android
+          if [ ! -f "capacitor.config.json" ]; then
+            echo '{"appId":"com.tutorschedule.app","appName":"Tutor Schedule","webDir":"dist"}' > capacitor.config.json
           fi
-          npx cap sync android
+          if [ ! -d "android" ]; then
+            npx @capacitor/cli add android
+          fi
+          npx @capacitor/cli sync android
 
       - name: Make gradlew executable
         run: chmod +x android/gradlew
