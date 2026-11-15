@@ -43,6 +43,20 @@ jobs:
           mkdir -p android/app/src/main/res/raw
           cp native-assets/alarm.wav android/app/src/main/res/raw/alarm.wav
 
+      - name: Apply custom app icon
+        run: |
+          for density in mdpi hdpi xhdpi xxhdpi xxxhdpi; do
+            cp "branding/icon/ic_launcher_${density}.png" "android/app/src/main/res/mipmap-${density}/ic_launcher.png"
+            cp "branding/icon/ic_launcher_round_${density}.png" "android/app/src/main/res/mipmap-${density}/ic_launcher_round.png"
+            cp "branding/icon/ic_launcher_foreground_${density}.png" "android/app/src/main/res/mipmap-${density}/ic_launcher_foreground.png"
+          done
+          cat > android/app/src/main/res/values/ic_launcher_background.xml <<'EOF'
+          <?xml version="1.0" encoding="utf-8"?>
+          <resources>
+              <color name="ic_launcher_background">#F5BFD5</color>
+          </resources>
+          EOF
+
       - name: Add notification & exact-alarm permissions
         run: |
           python3 - <<'PYEOF'
