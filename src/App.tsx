@@ -144,9 +144,10 @@ export default function App() {
     }
   }, []);
 
-  // Sync on launch (only if not already synced today, Manila time)
+  // Sync every time the app is opened/launched, regardless of whether it
+  // already synced today — the user expects fresh data on every open.
   useEffect(() => {
-    syncFromCloud(false);
+    syncFromCloud(true);
   }, [syncFromCloud]);
 
   // Re-check when the app returns to the foreground (new Manila day → sync),
